@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openclaw-voice"
+version = "0.1.0"
+description = "Voice interface for OpenClaw"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openwakeword>=0.5.0",
+    "mlx-whisper>=0.1.0",
+    "piper-tts>=1.2.0",
+    "websockets>=12.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+openclaw-voice = "src.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
