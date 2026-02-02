@@ -129,7 +129,7 @@ async def probe_gateway(url: str, message: str | None = None):
                 log(f"Sending message: {message}")
                 send_req = {
                     "type": "req",
-                    "id": 2,
+                    "id": str(uuid.uuid4()),
                     "method": "chat.send",
                     "params": {
                         "sessionKey": session_key,
@@ -153,6 +153,8 @@ async def probe_gateway(url: str, message: str | None = None):
                         msg_type = data.get("type")
                         if msg_type == "res":
                             log(f"Response: ok={data.get('ok')} id={data.get('id')}")
+                            if not data.get("ok") and data.get("error"):
+                                log(f"  Error: {json.dumps(data['error'])}")
                             if data.get("payload"):
                                 log(f"  Payload: {json.dumps(data['payload'])[:200]}")
                         elif msg_type == "event":
