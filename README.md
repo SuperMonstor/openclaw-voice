@@ -32,3 +32,5 @@ built out yet.
 ## Notes
 
 This repo is intended for local, on-device operation on macOS.
+Use Python 3.12 or 3.13 for the voice engine; Python 3.14 is not supported yet due to
+the `onnxruntime` dependency used by `openwakeword`.
