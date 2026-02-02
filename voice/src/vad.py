@@ -23,6 +23,8 @@ class SileroVAD:
         except ImportError as exc:
             raise RuntimeError("openwakeword is required for VAD") from exc
 
+        self._ensure_vad_model(openwakeword)
+
         self._vad = openwakeword.VAD()
         self._threshold = float(config.threshold)
         self._min_speech = float(config.min_speech_duration)
@@ -36,6 +38,23 @@ class SileroVAD:
         self._speech_started = False
         self._speech_duration = 0.0
         self._silence_duration = 0.0
+
+    @staticmethod
+    def _ensure_vad_model(openwakeword_module):
+        """Download Silero VAD model if missing."""
+        import os
+        import urllib.request
+        from pathlib import Path
+
+        vad_info = openwakeword_module.VAD_MODELS["silero_vad"]
+        model_path = vad_info["model_path"]
+        if os.path.exists(model_path):
+            return
+
+        target_dir = Path(model_path).parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        url = vad_info["download_url"]
+        urllib.request.urlretrieve(url, model_path)
 
     def is_speech(self, frame: np.ndarray, sample_rate: int) -> bool:
         """Return True if this frame is speech above threshold."""
