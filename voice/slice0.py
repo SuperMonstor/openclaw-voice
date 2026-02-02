@@ -226,6 +226,11 @@ def init_wake_word_model():
     except Exception as exc:
         log("ERROR", f"Failed to load wake word model: {type(exc).__name__}")
         return None, None
+
+    # Model keys are derived from filenames (e.g., hey_jarvis_v0.1)
+    model_keys = list(model.models.keys())
+    if model_keys:
+        model_name = model_keys[0]
     return model, model_name
 
 
