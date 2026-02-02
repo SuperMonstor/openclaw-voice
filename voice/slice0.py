@@ -29,6 +29,8 @@ from pathlib import Path
 SAMPLE_RATE = 16000
 CHANNELS = 1
 RECORD_SECONDS = 5  # Fixed recording duration for slice0
+PROTOCOL_VERSION = 3
+DEVICE_STATE_PATH = Path(__file__).parent / ".openclaw_device.json"
 
 
 def log(state: str, msg: str):
@@ -47,6 +49,54 @@ def list_input_devices():
         if info.get("max_input_channels", 0) > 0:
             input_devices.append((idx, info.get("name", f"Device {idx}")))
     return input_devices
+
+
+def load_gateway_token() -> str | None:
+    """Load gateway auth token from env or OpenClaw config."""
+    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    if token:
+        return token
+
+    config_path = os.environ.get(
+        "OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json")
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config.get("gateway", {}).get("auth", {}).get("token")
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log("ERROR", f"Failed to read OpenClaw config: {type(exc).__name__}")
+        return None
+
+
+def load_device_state() -> dict:
+    if DEVICE_STATE_PATH.exists():
+        try:
+            with open(DEVICE_STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as exc:
+            log("ERROR", f"Failed to read device state: {type(exc).__name__}")
+    return {}
+
+
+def save_device_state(state: dict):
+    try:
+        with open(DEVICE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as exc:
+        log("ERROR", f"Failed to write device state: {type(exc).__name__}")
+
+
+def get_device_id() -> str:
+    state = load_device_state()
+    device_id = state.get("deviceId")
+    if not device_id:
+        device_id = f"voice-{uuid.uuid4()}"
+        state["deviceId"] = device_id
+        save_device_state(state)
+    return device_id
 
 
 def select_microphone() -> int | None:
@@ -151,18 +201,50 @@ async def send_to_gateway(url: str, message: str) -> str:
         # Wait for challenge
         challenge = await asyncio.wait_for(ws.recv(), timeout=5.0)
         challenge_data = json.loads(challenge)
+        challenge_payload = challenge_data.get("payload", {})
+        nonce = challenge_payload.get("nonce")
+        ts = challenge_payload.get("ts")
 
         if challenge_data.get("event") == "connect.challenge":
-            # Authenticate
+            device_state = load_device_state()
+            device_token = device_state.get("deviceToken")
+            gateway_token = load_gateway_token()
+            auth_token = device_token or gateway_token
+            if not auth_token:
+                raise Exception(
+                    "Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN or run OpenClaw onboarding."
+                )
+
+            device_id = device_state.get("deviceId") or get_device_id()
+            device = {"id": device_id}
+            if nonce:
+                device["nonce"] = nonce
+            if ts:
+                device["signedAt"] = ts
+
+            # Authenticate (protocol v3)
             connect_req = {
                 "type": "req",
                 "id": 1,
                 "method": "connect",
                 "params": {
+                    "minProtocol": PROTOCOL_VERSION,
+                    "maxProtocol": PROTOCOL_VERSION,
+                    "client": {
+                        "id": "voice",
+                        "version": "0.1.0",
+                        "platform": "macos",
+                        "mode": "operator",
+                    },
                     "role": "operator",
                     "scopes": ["operator.read", "operator.write"],
-                    "clientType": "voice",
-                    "clientVersion": "0.1.0",
+                    "caps": [],
+                    "commands": [],
+                    "permissions": {},
+                    "auth": {"token": auth_token},
+                    "locale": "en-US",
+                    "userAgent": "openclaw-voice/0.1.0",
+                    "device": device,
                 },
             }
             await ws.send(json.dumps(connect_req))
@@ -172,6 +254,14 @@ async def send_to_gateway(url: str, message: str) -> str:
 
             if not response_data.get("ok"):
                 raise Exception(f"Auth failed: {response_data.get('error')}")
+
+            payload = response_data.get("payload", {})
+            auth_payload = payload.get("auth", {})
+            device_token = auth_payload.get("deviceToken")
+            if device_token:
+                device_state["deviceId"] = device_id
+                device_state["deviceToken"] = device_token
+                save_device_state(device_state)
 
             log("GATEWAY", "Authenticated")
 

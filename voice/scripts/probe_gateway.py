@@ -21,6 +21,8 @@ import json
 import argparse
 import uuid
 from datetime import datetime
+from pathlib import Path
+import os
 
 
 def timestamp():
@@ -29,6 +31,56 @@ def timestamp():
 
 def log(msg):
     print(f"[{timestamp()}] {msg}")
+
+
+PROTOCOL_VERSION = 3
+DEVICE_STATE_PATH = Path(__file__).resolve().parent.parent / ".openclaw_device.json"
+
+
+def load_gateway_token() -> str | None:
+    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    if token:
+        return token
+
+    config_path = os.environ.get(
+        "OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json")
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config.get("gateway", {}).get("auth", {}).get("token")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def load_device_state() -> dict:
+    if DEVICE_STATE_PATH.exists():
+        try:
+            with open(DEVICE_STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_device_state(state: dict):
+    try:
+        with open(DEVICE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
+def get_device_id() -> str:
+    state = load_device_state()
+    device_id = state.get("deviceId")
+    if not device_id:
+        device_id = f"voice-{uuid.uuid4()}"
+        state["deviceId"] = device_id
+        save_device_state(state)
+    return device_id
 
 
 async def probe_gateway(url: str, message: str | None = None):
@@ -52,16 +104,48 @@ async def probe_gateway(url: str, message: str | None = None):
             log(f"Challenge payload: {json.dumps(challenge_data.get('payload', {}))}")
 
             if challenge_data.get("event") == "connect.challenge":
+                challenge_payload = challenge_data.get("payload", {})
+                nonce = challenge_payload.get("nonce")
+                ts = challenge_payload.get("ts")
+
+                device_state = load_device_state()
+                device_token = device_state.get("deviceToken")
+                gateway_token = load_gateway_token()
+                auth_token = device_token or gateway_token
+                if not auth_token:
+                    log("Missing gateway token. Set OPENCLAW_GATEWAY_TOKEN or run onboarding.")
+                    return
+
+                device_id = device_state.get("deviceId") or get_device_id()
+                device = {"id": device_id}
+                if nonce:
+                    device["nonce"] = nonce
+                if ts:
+                    device["signedAt"] = ts
+
                 # Respond with connect request (operator role, loopback)
                 connect_req = {
                     "type": "req",
                     "id": 1,
                     "method": "connect",
                     "params": {
+                        "minProtocol": PROTOCOL_VERSION,
+                        "maxProtocol": PROTOCOL_VERSION,
+                        "client": {
+                            "id": "voice",
+                            "version": "0.1.0",
+                            "platform": "macos",
+                            "mode": "operator",
+                        },
                         "role": "operator",
                         "scopes": ["operator.read", "operator.write"],
-                        "clientType": "voice",
-                        "clientVersion": "0.1.0",
+                        "caps": [],
+                        "commands": [],
+                        "permissions": {},
+                        "auth": {"token": auth_token},
+                        "locale": "en-US",
+                        "userAgent": "openclaw-voice/0.1.0",
+                        "device": device,
                     }
                 }
                 log(f"Sending connect request...")
@@ -75,6 +159,14 @@ async def probe_gateway(url: str, message: str | None = None):
                 if not response_data.get("ok"):
                     log(f"Auth failed: {response_data.get('error')}")
                     return
+
+                payload = response_data.get("payload", {})
+                auth_payload = payload.get("auth", {})
+                device_token = auth_payload.get("deviceToken")
+                if device_token:
+                    device_state["deviceId"] = device_id
+                    device_state["deviceToken"] = device_token
+                    save_device_state(device_state)
 
             # If message provided, send it
             if message:

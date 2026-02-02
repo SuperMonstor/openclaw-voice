@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.openclaw_device.json
 
 # macOS
 .DS_Store
