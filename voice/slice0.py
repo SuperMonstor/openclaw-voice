@@ -36,6 +36,7 @@ PROTOCOL_VERSION = 3
 WAKEWORD_MODEL = os.environ.get("OPENCLAW_WAKEWORD_MODEL", "hey_jarvis")
 WAKEWORD_THRESHOLD = float(os.environ.get("OPENCLAW_WAKEWORD_THRESHOLD", "0.5"))
 WAKEWORD_DEBOUNCE_SEC = 1.0
+WAKEWORD_DEBUG = os.environ.get("OPENCLAW_WAKEWORD_DEBUG", "0") == "1"
 
 
 def log(state: str, msg: str):
@@ -54,6 +55,22 @@ def list_input_devices():
         if info.get("max_input_channels", 0) > 0:
             input_devices.append((idx, info.get("name", f"Device {idx}")))
     return input_devices
+
+
+def get_default_input_device_name() -> str | None:
+    """Return the default input device name if available."""
+    try:
+        import sounddevice as sd
+    except ImportError:
+        return None
+    try:
+        default_idx = sd.default.device[0] if sd.default.device else None
+        if default_idx is None:
+            return None
+        info = sd.query_devices(default_idx)
+        return info.get("name")
+    except Exception:
+        return None
 
 
 def load_gateway_token() -> str | None:
@@ -230,6 +247,7 @@ def wait_for_wake_word(device: int | None = None):
 
     log("WAKEWORD", f"Listening for '{model_name}' (threshold {WAKEWORD_THRESHOLD})")
     last_trigger = 0.0
+    last_debug = 0.0
 
     with sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -239,16 +257,22 @@ def wait_for_wake_word(device: int | None = None):
         device=device,
         callback=callback,
     ):
-        while True:
-            audio = audio_q.get()
-            audio = np.squeeze(audio)
-            scores = model.predict(audio)
-            score = scores.get(model_name, 0.0)
-            now = time.time()
-            if score >= WAKEWORD_THRESHOLD and (now - last_trigger) >= WAKEWORD_DEBOUNCE_SEC:
-                last_trigger = now
-                log("WAKEWORD", f"Detected '{model_name}' (score {score:.2f})")
-                return
+        try:
+            while True:
+                audio = audio_q.get()
+                audio = np.squeeze(audio)
+                scores = model.predict(audio)
+                score = scores.get(model_name, 0.0)
+                now = time.time()
+                if WAKEWORD_DEBUG and (now - last_debug) >= 1.0:
+                    log("WAKEWORD", f"Score {score:.3f}")
+                    last_debug = now
+                if score >= WAKEWORD_THRESHOLD and (now - last_trigger) >= WAKEWORD_DEBOUNCE_SEC:
+                    last_trigger = now
+                    log("WAKEWORD", f"Detected '{model_name}' (score {score:.2f})")
+                    return True
+        except KeyboardInterrupt:
+            return False
 
 
 def record_audio(duration: float = RECORD_SECONDS, device: int | None = None) -> bytes:
@@ -447,6 +471,9 @@ async def voice_loop(gateway_url: str):
     print(f"  Gateway: {gateway_url}")
     print(f"  Recording: {RECORD_SECONDS}s fixed duration")
     print(f"  Wake word: {WAKEWORD_MODEL} (threshold {WAKEWORD_THRESHOLD})")
+    default_mic = get_default_input_device_name()
+    if default_mic:
+        print(f"  Default mic: {default_mic}")
     print("  Press Enter to start wake-word listening, 'm' to select microphone, Ctrl+C to quit")
     print("=" * 60 + "\n")
 
@@ -472,7 +499,9 @@ async def voice_loop(gateway_url: str):
                 continue
 
             log("WAKEWORD", "Waiting for wake word...")
-            wait_for_wake_word(device=selected_input_device)
+            if wait_for_wake_word(device=selected_input_device) is False:
+                log("IDLE", "Goodbye!")
+                break
             log("IDLE", "Wake word detected, starting voice interaction")
 
             # Record audio
