@@ -12,6 +12,7 @@ enum OverlayState: String, CaseIterable {
 struct CLIArgs {
     let state: OverlayState?
     let testCycle: Bool
+    let socketPath: String
 
     static func parse() -> CLIArgs {
         return parse(from: ProcessInfo.processInfo.arguments)
@@ -20,6 +21,7 @@ struct CLIArgs {
     static func parse(from args: [String]) -> CLIArgs {
         var state: OverlayState?
         var testCycle = false
+        var socketPath = "/tmp/openclaw_voice.sock"
 
         if let idx = args.firstIndex(of: "--state"), idx + 1 < args.count {
             state = OverlayState(rawValue: args[idx + 1].lowercased())
@@ -27,8 +29,11 @@ struct CLIArgs {
         if args.contains("--test-cycle") {
             testCycle = true
         }
+        if let idx = args.firstIndex(of: "--socket"), idx + 1 < args.count {
+            socketPath = args[idx + 1]
+        }
 
-        return CLIArgs(state: state, testCycle: testCycle)
+        return CLIArgs(state: state, testCycle: testCycle, socketPath: socketPath)
     }
 }
 
@@ -37,6 +42,7 @@ final class OverlayViewModel: ObservableObject {
     @Published var transcription: String = "Ready"
 
     private var timer: Timer?
+    private var socket: VoiceEngineSocket?
 
     func apply(args: CLIArgs) {
         if let state = args.state {
@@ -44,7 +50,9 @@ final class OverlayViewModel: ObservableObject {
         }
         if args.testCycle {
             startTestCycle()
+            return
         }
+        connectSocket(path: args.socketPath)
     }
 
     private func startTestCycle() {
@@ -56,6 +64,44 @@ final class OverlayViewModel: ObservableObject {
             self.state = states[idx % states.count]
             self.transcription = "State: \(self.state.rawValue)"
             idx += 1
+        }
+    }
+
+    private func connectSocket(path: String) {
+        socket?.stop()
+        let socket = VoiceEngineSocket(path: path)
+        socket.onEvent = { [weak self] message in
+            self?.handleEvent(message)
+        }
+        self.socket = socket
+        socket.start()
+    }
+
+    private func handleEvent(_ message: [String: Any]) {
+        guard let type = message["type"] as? String, type == "event" else {
+            return
+        }
+        guard let event = message["event"] as? String else {
+            return
+        }
+        let payload = message["payload"] as? [String: Any] ?? [:]
+
+        switch event {
+        case "state_change":
+            if let stateRaw = payload["state"] as? String,
+               let state = OverlayState(rawValue: stateRaw.lowercased()) {
+                self.state = state
+            }
+        case "transcription":
+            if let text = payload["text"] as? String {
+                self.transcription = text
+            }
+        case "response_chunk":
+            if let text = payload["text"] as? String {
+                self.transcription = text
+            }
+        default:
+            break
         }
     }
 }

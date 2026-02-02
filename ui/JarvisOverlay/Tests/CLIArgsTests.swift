@@ -13,4 +13,9 @@ final class CLIArgsTests: XCTestCase {
         XCTAssertNil(args.state)
         XCTAssertTrue(args.testCycle)
     }
+
+    func testParseSocketPath() {
+        let args = CLIArgs.parse(from: ["JarvisOverlay", "--socket", "/tmp/test.sock"])
+        XCTAssertEqual(args.socketPath, "/tmp/test.sock")
+    }
 }

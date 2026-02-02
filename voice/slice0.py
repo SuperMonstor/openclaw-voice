@@ -375,7 +375,7 @@ def speak(text: str):
     log("SPEAKING", "Done speaking")
 
 
-async def send_to_gateway(url: str, message: str) -> str:
+async def send_to_gateway(url: str, message: str, on_chunk=None) -> str:
     """Send message to OpenClaw Gateway and collect response."""
     import websockets
 
@@ -485,6 +485,8 @@ async def send_to_gateway(url: str, message: str) -> str:
                                 if text:
                                     full_response += text
                                     print(text, end="", flush=True)
+                                    if on_chunk:
+                                        on_chunk(text)
                         if state in {"final", "error", "aborted"}:
                             log("GATEWAY", f"Chat state: {state}")
                             break
@@ -525,6 +527,12 @@ async def voice_loop(gateway_url: str):
 
     selected_input_device = None
 
+    from src.ui_socket import UISocketServer
+
+    ui_socket = UISocketServer()
+    ui_socket.start()
+    ui_socket.send_event("state_change", {"state": "idle"})
+
     while True:
         try:
             try:
@@ -545,9 +553,11 @@ async def voice_loop(gateway_url: str):
                 continue
 
             log("WAKEWORD", "Waiting for wake word...")
+            ui_socket.send_event("state_change", {"state": "idle"})
             if wait_for_wake_word(device=selected_input_device) is False:
                 log("IDLE", "Goodbye!")
                 break
+            ui_socket.send_event("state_change", {"state": "listening"})
             log("IDLE", "Wake word detected, starting voice interaction")
 
             # Record audio
@@ -558,7 +568,10 @@ async def voice_loop(gateway_url: str):
             save_wav(audio_data, audio_path)
 
             # Transcribe
+            ui_socket.send_event("state_change", {"state": "transcribing"})
             transcription = transcribe(audio_path)
+            if transcription:
+                ui_socket.send_event("transcription", {"text": transcription})
 
             if not transcription:
                 log("IDLE", "No speech detected, try again")
@@ -566,8 +579,15 @@ async def voice_loop(gateway_url: str):
 
             # Send to gateway
             log("WAITING", "Sending to OpenClaw...")
+            ui_socket.send_event("state_change", {"state": "responding"})
             try:
-                response = await send_to_gateway(gateway_url, transcription)
+                response = await send_to_gateway(
+                    gateway_url,
+                    transcription,
+                    on_chunk=lambda chunk: ui_socket.send_event(
+                        "response_chunk", {"text": chunk}
+                    ),
+                )
             except ConnectionRefusedError:
                 log("ERROR", "Gateway not running. Start with: openclaw gateway")
                 continue
@@ -580,13 +600,17 @@ async def voice_loop(gateway_url: str):
                 continue
 
             # Speak response
+            ui_socket.send_event("state_change", {"state": "speaking"})
             speak(response)
 
+            ui_socket.send_event("state_change", {"state": "idle"})
             log("IDLE", "Ready for next interaction")
 
         except KeyboardInterrupt:
             print("\n")
             log("IDLE", "Goodbye!")
+            ui_socket.send_event("state_change", {"state": "idle"})
+            ui_socket.stop()
             break
         except Exception as e:
             log("ERROR", f"{type(e).__name__}: {e}")
