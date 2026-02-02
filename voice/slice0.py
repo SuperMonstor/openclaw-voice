@@ -119,47 +119,82 @@ def init_wake_word_model():
         log("ERROR", "openwakeword not installed. Install with: pip install openwakeword")
         return None, None
 
-    try:
-        import tflite_runtime.interpreter  # type: ignore
-        inference_framework = "tflite"
-    except Exception as exc:
+    def ensure_file(url: str, path: Path):
+        if path.exists():
+            return
+        log("WAKEWORD", f"Downloading {path.name}...")
+        urllib.request.urlretrieve(url, path)
+        log("WAKEWORD", f"Downloaded {path.name}")
+
+    desired_inference = None
+    if os.path.exists(WAKEWORD_MODEL):
+        if WAKEWORD_MODEL.endswith(".onnx"):
+            desired_inference = "onnx"
+        elif WAKEWORD_MODEL.endswith(".tflite"):
+            desired_inference = "tflite"
+
+    if desired_inference == "tflite" or desired_inference is None:
+        try:
+            import tflite_runtime.interpreter  # type: ignore
+            inference_framework = "tflite"
+        except Exception:
+            inference_framework = None
+    else:
+        inference_framework = None
+
+    if desired_inference == "onnx" or inference_framework is None:
         try:
             import onnxruntime  # type: ignore
+            inference_framework = "onnx"
         except Exception:
-            log("ERROR", "Missing tflite-runtime and onnxruntime")
-            log("ERROR", "Install one of: pip install tflite-runtime | pip install onnxruntime")
-            return None, None
-        inference_framework = "onnx"
+            inference_framework = None
+
+    if inference_framework is None:
+        log("ERROR", "Missing tflite-runtime and onnxruntime")
+        log("ERROR", "Install one of: pip install tflite-runtime | pip install onnxruntime")
+        return None, None
+
+    target_dir = Path(__file__).resolve().parent.parent / "models" / "wakeword"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure feature models for the selected framework
+    feature_suffix = ".onnx" if inference_framework == "onnx" else ".tflite"
+    melspec_url = openwakeword.FEATURE_MODELS["melspectrogram"]["download_url"].replace(
+        ".tflite", feature_suffix
+    )
+    embed_url = openwakeword.FEATURE_MODELS["embedding"]["download_url"].replace(
+        ".tflite", feature_suffix
+    )
+    melspec_path = target_dir / f"melspectrogram{feature_suffix}"
+    embed_path = target_dir / f"embedding_model{feature_suffix}"
+    ensure_file(melspec_url, melspec_path)
+    ensure_file(embed_url, embed_path)
 
     if WAKEWORD_MODEL in openwakeword.MODELS:
         model_name = WAKEWORD_MODEL
         model_info = openwakeword.MODELS[model_name]
-        base_path = model_info["model_path"]
+        base_path = model_info["model_path"].replace(".tflite", feature_suffix)
         base_url = model_info.get("download_url")
-        if inference_framework == "onnx":
-            base_path = base_path.replace(".tflite", ".onnx")
-            base_url = base_url.replace(".tflite", ".onnx") if base_url else None
-        target_dir = Path(__file__).resolve().parent.parent / "models" / "wakeword"
-        target_dir.mkdir(parents=True, exist_ok=True)
+        if base_url:
+            base_url = base_url.replace(".tflite", feature_suffix)
         target_path = target_dir / os.path.basename(base_path)
-        if not target_path.exists():
-            if base_url:
-                log("WAKEWORD", f"Downloading model to {target_path}...")
-                urllib.request.urlretrieve(base_url, target_path)
-                log("WAKEWORD", "Download complete")
-            elif os.path.exists(base_path):
-                target_path = Path(base_path)
-            else:
-                log("ERROR", f"Wake word model not found: {base_path}")
-                return None, None
+        if base_url:
+            ensure_file(base_url, target_path)
+        elif os.path.exists(base_path):
+            target_path = Path(base_path)
+        else:
+            log("ERROR", f"Wake word model not found: {base_path}")
+            return None, None
         model_path = str(target_path)
     elif os.path.exists(WAKEWORD_MODEL):
         model_name = os.path.splitext(os.path.basename(WAKEWORD_MODEL))[0]
         model_path = WAKEWORD_MODEL
         if model_path.endswith(".onnx"):
             inference_framework = "onnx"
+            feature_suffix = ".onnx"
         elif model_path.endswith(".tflite"):
             inference_framework = "tflite"
+            feature_suffix = ".tflite"
     else:
         log("ERROR", f"Unknown wake word model: {WAKEWORD_MODEL}")
         return None, None
@@ -168,6 +203,8 @@ def init_wake_word_model():
         model = openwakeword.Model(
             wakeword_models=[model_path],
             inference_framework=inference_framework,
+            melspec_model_path=str(melspec_path),
+            embedding_model_path=str(embed_path),
         )
     except Exception as exc:
         log("ERROR", f"Failed to load wake word model: {type(exc).__name__}")
