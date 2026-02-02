@@ -533,8 +533,8 @@ async def voice_loop(gateway_url: str):
     ui_socket.start()
     ui_socket.send_event("state_change", {"state": "idle"})
 
-    while True:
-        try:
+    try:
+        while True:
             try:
                 cmd = input("\n>>> Press Enter to start wake-word listening (m=mic, q=quit)...")
             except KeyboardInterrupt:
@@ -605,15 +605,11 @@ async def voice_loop(gateway_url: str):
 
             ui_socket.send_event("state_change", {"state": "idle"})
             log("IDLE", "Ready for next interaction")
-
-        except KeyboardInterrupt:
-            print("\n")
-            log("IDLE", "Goodbye!")
-            ui_socket.send_event("state_change", {"state": "idle"})
-            ui_socket.stop()
-            break
-        except Exception as e:
-            log("ERROR", f"{type(e).__name__}: {e}")
+    finally:
+        ui_socket.send_event("state_change", {"state": "idle"})
+        ui_socket.stop()
+        if _TTS_ENGINE is not None:
+            _TTS_ENGINE.stop()
 
 
 def main():
