@@ -24,6 +24,7 @@ import tempfile
 import argparse
 import uuid
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -118,21 +119,58 @@ def init_wake_word_model():
         log("ERROR", "openwakeword not installed. Install with: pip install openwakeword")
         return None, None
 
+    try:
+        import tflite_runtime.interpreter  # type: ignore
+        inference_framework = "tflite"
+    except Exception as exc:
+        try:
+            import onnxruntime  # type: ignore
+        except Exception:
+            log("ERROR", "Missing tflite-runtime and onnxruntime")
+            log("ERROR", "Install one of: pip install tflite-runtime | pip install onnxruntime")
+            return None, None
+        inference_framework = "onnx"
+
     if WAKEWORD_MODEL in openwakeword.MODELS:
         model_name = WAKEWORD_MODEL
+        model_info = openwakeword.MODELS[model_name]
+        base_path = model_info["model_path"]
+        base_url = model_info.get("download_url")
+        if inference_framework == "onnx":
+            base_path = base_path.replace(".tflite", ".onnx")
+            base_url = base_url.replace(".tflite", ".onnx") if base_url else None
+        target_dir = Path(__file__).resolve().parent.parent / "models" / "wakeword"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / os.path.basename(base_path)
+        if not target_path.exists():
+            if base_url:
+                log("WAKEWORD", f"Downloading model to {target_path}...")
+                urllib.request.urlretrieve(base_url, target_path)
+                log("WAKEWORD", "Download complete")
+            elif os.path.exists(base_path):
+                target_path = Path(base_path)
+            else:
+                log("ERROR", f"Wake word model not found: {base_path}")
+                return None, None
+        model_path = str(target_path)
     elif os.path.exists(WAKEWORD_MODEL):
         model_name = os.path.splitext(os.path.basename(WAKEWORD_MODEL))[0]
+        model_path = WAKEWORD_MODEL
+        if model_path.endswith(".onnx"):
+            inference_framework = "onnx"
+        elif model_path.endswith(".tflite"):
+            inference_framework = "tflite"
     else:
         log("ERROR", f"Unknown wake word model: {WAKEWORD_MODEL}")
         return None, None
 
     try:
         model = openwakeword.Model(
-            wakeword_models=[WAKEWORD_MODEL],
+            wakeword_models=[model_path],
+            inference_framework=inference_framework,
         )
     except Exception as exc:
         log("ERROR", f"Failed to load wake word model: {type(exc).__name__}")
-        log("ERROR", "Install tflite runtime: pip install tflite-runtime")
         return None, None
     return model, model_name
 
