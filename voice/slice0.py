@@ -18,10 +18,12 @@ Press Enter to start recording, speak, wait for response.
 import asyncio
 import json
 import os
+import queue
 import subprocess
 import tempfile
 import argparse
 import uuid
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +32,9 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 RECORD_SECONDS = 5  # Fixed recording duration for slice0
 PROTOCOL_VERSION = 3
+WAKEWORD_MODEL = os.environ.get("OPENCLAW_WAKEWORD_MODEL", "hey_jarvis")
+WAKEWORD_THRESHOLD = float(os.environ.get("OPENCLAW_WAKEWORD_THRESHOLD", "0.5"))
+WAKEWORD_DEBOUNCE_SEC = 1.0
 
 
 def log(state: str, msg: str):
@@ -103,6 +108,68 @@ def select_microphone() -> int | None:
     sd.default.device = (selected, sd.default.device[1])
     log("IDLE", f"Selected input device {selected}")
     return selected
+
+
+def init_wake_word_model():
+    """Initialize openWakeWord model."""
+    try:
+        import openwakeword
+    except ImportError:
+        log("ERROR", "openwakeword not installed. Install with: pip install openwakeword")
+        return None, None
+
+    if WAKEWORD_MODEL in openwakeword.MODELS:
+        model_name = WAKEWORD_MODEL
+    elif os.path.exists(WAKEWORD_MODEL):
+        model_name = os.path.splitext(os.path.basename(WAKEWORD_MODEL))[0]
+    else:
+        log("ERROR", f"Unknown wake word model: {WAKEWORD_MODEL}")
+        return None, None
+
+    model = openwakeword.Model(
+        wakeword_models=[WAKEWORD_MODEL],
+        inference_framework="onnx",
+    )
+    return model, model_name
+
+
+def wait_for_wake_word(device: int | None = None):
+    """Block until wake word is detected."""
+    import sounddevice as sd
+    import numpy as np
+
+    model, model_name = init_wake_word_model()
+    if not model:
+        raise RuntimeError("openwakeword model failed to initialize")
+
+    audio_q: queue.Queue[np.ndarray] = queue.Queue()
+
+    def callback(indata, frames, time_info, status):
+        if status:
+            log("WAKEWORD", f"Audio status: {status}")
+        audio_q.put(indata.copy())
+
+    log("WAKEWORD", f"Listening for '{model_name}' (threshold {WAKEWORD_THRESHOLD})")
+    last_trigger = 0.0
+
+    with sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
+        dtype=np.float32,
+        blocksize=1280,
+        device=device,
+        callback=callback,
+    ):
+        while True:
+            audio = audio_q.get()
+            audio = np.squeeze(audio)
+            scores = model.predict(audio)
+            score = scores.get(model_name, 0.0)
+            now = time.time()
+            if score >= WAKEWORD_THRESHOLD and (now - last_trigger) >= WAKEWORD_DEBOUNCE_SEC:
+                last_trigger = now
+                log("WAKEWORD", f"Detected '{model_name}' (score {score:.2f})")
+                return
 
 
 def record_audio(duration: float = RECORD_SECONDS, device: int | None = None) -> bytes:
@@ -300,7 +367,8 @@ async def voice_loop(gateway_url: str):
     print("=" * 60)
     print(f"  Gateway: {gateway_url}")
     print(f"  Recording: {RECORD_SECONDS}s fixed duration")
-    print("  Press Enter to speak, 'm' to select microphone, Ctrl+C to quit")
+    print(f"  Wake word: {WAKEWORD_MODEL} (threshold {WAKEWORD_THRESHOLD})")
+    print("  Press Enter to start wake-word listening, 'm' to select microphone, Ctrl+C to quit")
     print("=" * 60 + "\n")
 
     selected_input_device = None
@@ -308,7 +376,7 @@ async def voice_loop(gateway_url: str):
     while True:
         try:
             try:
-                cmd = input("\n>>> Press Enter to start recording (m=mic, q=quit)...")
+                cmd = input("\n>>> Press Enter to start wake-word listening (m=mic, q=quit)...")
             except KeyboardInterrupt:
                 print("\n")
                 log("IDLE", "Goodbye!")
@@ -321,10 +389,12 @@ async def voice_loop(gateway_url: str):
                 selected_input_device = select_microphone()
                 continue
             if cmd:
-                log("IDLE", f"Unknown command '{cmd}', press Enter to record")
+                log("IDLE", f"Unknown command '{cmd}', press Enter to listen")
                 continue
 
-            log("IDLE", "Starting voice interaction")
+            log("WAKEWORD", "Waiting for wake word...")
+            wait_for_wake_word(device=selected_input_device)
+            log("IDLE", "Wake word detected, starting voice interaction")
 
             # Record audio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
