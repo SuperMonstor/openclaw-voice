@@ -49,10 +49,9 @@ final class VoiceEngineSocket {
         if pathBytes.count >= MemoryLayout.size(ofValue: addr.sun_path) {
             return false
         }
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            let buffer = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
-            buffer.initialize(repeating: 0, count: MemoryLayout.size(ofValue: addr.sun_path))
-            buffer.assign(from: pathBytes, count: pathBytes.count)
+        withUnsafeMutableBytes(of: &addr.sun_path) { rawBuffer in
+            rawBuffer.initialize(repeating: 0)
+            _ = rawBuffer.copyBytes(from: pathBytes)
         }
 
         let addrLen = socklen_t(MemoryLayout.size(ofValue: addr))
