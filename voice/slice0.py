@@ -266,7 +266,8 @@ def wait_for_wake_word(device: int | None = None):
             while True:
                 audio = audio_q.get()
                 audio = np.squeeze(audio)
-                scores = model.predict(audio)
+                audio_int16 = np.clip(audio * 32768.0, -32768, 32767).astype(np.int16)
+                scores = model.predict(audio_int16)
                 score = scores.get(model_name, 0.0)
                 now = time.time()
                 if WAKEWORD_DEBUG and (now - last_debug) >= 1.0:
