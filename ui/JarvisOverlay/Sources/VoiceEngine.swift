@@ -1,12 +1,10 @@
 import Foundation
-import Network
 
 final class VoiceEngineSocket {
     private let path: String
-    private let queue = DispatchQueue(label: "voice.engine.socket")
-    private var connection: NWConnection?
-    private var reconnectTimer: DispatchSourceTimer?
-    private var buffer = Data()
+    private var running = false
+    private var thread: Thread?
+    private var fd: Int32 = -1
 
     var onEvent: (([String: Any]) -> Void)?
 
@@ -15,97 +13,94 @@ final class VoiceEngineSocket {
     }
 
     func start() {
-        queue.async { [weak self] in
-            self?.connect()
+        guard !running else { return }
+        running = true
+        thread = Thread { [weak self] in
+            self?.runLoop()
         }
+        thread?.start()
     }
 
     func stop() {
-        queue.async { [weak self] in
-            self?.reconnectTimer?.cancel()
-            self?.reconnectTimer = nil
-            self?.connection?.stateUpdateHandler = nil
-            self?.connection?.cancel()
-            self?.connection = nil
-            self?.buffer.removeAll(keepingCapacity: false)
+        running = false
+        closeSocket()
+    }
+
+    private func runLoop() {
+        while running {
+            if connectSocket() {
+                readLoop()
+            } else {
+                Thread.sleep(forTimeInterval: 1.0)
+            }
         }
     }
 
-    private func connect() {
-        if connection != nil {
-            return
+    private func connectSocket() -> Bool {
+        closeSocket()
+        fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if fd < 0 {
+            return false
         }
 
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        let connection = NWConnection(to: .unix(path: path), using: params)
-        self.connection = connection
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        if pathBytes.count >= MemoryLayout.size(ofValue: addr.sun_path) {
+            return false
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            let buffer = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: UInt8.self)
+            buffer.initialize(repeating: 0, count: MemoryLayout.size(ofValue: addr.sun_path))
+            buffer.assign(from: pathBytes, count: pathBytes.count)
+        }
 
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.receive()
-            case .failed, .cancelled:
-                self.connection = nil
-                self.scheduleReconnect()
-            default:
+        let addrLen = socklen_t(MemoryLayout.size(ofValue: addr))
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, addrLen)
+            }
+        }
+        if result != 0 {
+            closeSocket()
+            return false
+        }
+        return true
+    }
+
+    private func readLoop() {
+        var buffer = Data()
+        var readBuf = [UInt8](repeating: 0, count: 4096)
+        while running {
+            let count = read(fd, &readBuf, readBuf.count)
+            if count <= 0 {
                 break
             }
+            buffer.append(readBuf, count: count)
+            while let range = buffer.firstRange(of: Data([0x0A])) { // newline
+                let line = buffer.subdata(in: 0..<range.lowerBound)
+                buffer.removeSubrange(0...range.lowerBound)
+                handleLine(line)
+            }
         }
-
-        connection.start(queue: queue)
+        closeSocket()
     }
 
-    private func scheduleReconnect() {
-        if reconnectTimer != nil {
+    private func handleLine(_ line: Data) {
+        guard !line.isEmpty else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: line),
+              let dict = obj as? [String: Any] else {
             return
         }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1.0)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.reconnectTimer?.cancel()
-            self.reconnectTimer = nil
-            self.connect()
-        }
-        reconnectTimer = timer
-        timer.resume()
-    }
-
-    private func receive() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-
-            if let data, !data.isEmpty {
-                self.buffer.append(data)
-                self.processBuffer()
-            }
-
-            if error != nil || isComplete {
-                self.connection?.cancel()
-                self.connection = nil
-                self.scheduleReconnect()
-                return
-            }
-
-            self.receive()
+        DispatchQueue.main.async { [weak self] in
+            self?.onEvent?(dict)
         }
     }
 
-    private func processBuffer() {
-        while let range = buffer.firstRange(of: Data([0x0A])) {
-            let line = buffer.subdata(in: 0..<range.lowerBound)
-            buffer.removeSubrange(0...range.lowerBound)
-
-            guard !line.isEmpty else { continue }
-            guard let json = try? JSONSerialization.jsonObject(with: line),
-                  let dict = json as? [String: Any] else {
-                continue
-            }
-            DispatchQueue.main.async { [weak self] in
-                self?.onEvent?(dict)
-            }
+    private func closeSocket() {
+        if fd >= 0 {
+            _ = Darwin.close(fd)
+            fd = -1
         }
     }
 }
