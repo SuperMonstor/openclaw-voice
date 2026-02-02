@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="/Users/sudarshansk/Documents/dev/openclaw-voice"
+
+"$REPO_ROOT/scripts/run_all.sh"
