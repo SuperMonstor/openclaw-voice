@@ -17,6 +17,7 @@ Press Enter to start recording, speak, wait for response.
 
 import asyncio
 import json
+import os
 import subprocess
 import tempfile
 import argparse
@@ -36,7 +37,54 @@ def log(state: str, msg: str):
     print(f"[{ts}] [{state:^12}] {msg}")
 
 
-def record_audio(duration: float = RECORD_SECONDS) -> bytes:
+def list_input_devices():
+    """Return list of (device_index, name) for input-capable devices."""
+    import sounddevice as sd
+
+    devices = sd.query_devices()
+    input_devices = []
+    for idx, info in enumerate(devices):
+        if info.get("max_input_channels", 0) > 0:
+            input_devices.append((idx, info.get("name", f"Device {idx}")))
+    return input_devices
+
+
+def select_microphone() -> int | None:
+    """Prompt user to select an input device. Returns selected device index."""
+    import sounddevice as sd
+
+    input_devices = list_input_devices()
+    if not input_devices:
+        log("ERROR", "No input devices found")
+        return None
+
+    current_default = sd.default.device[0] if sd.default.device else None
+    print("\nAvailable input devices:")
+    for idx, name in input_devices:
+        default_mark = " (default)" if idx == current_default else ""
+        print(f"  [{idx}] {name}{default_mark}")
+
+    choice = input("Select input device index (blank to cancel): ").strip()
+    if not choice:
+        log("IDLE", "Microphone selection canceled")
+        return None
+
+    try:
+        selected = int(choice)
+    except ValueError:
+        log("ERROR", f"Invalid device index: {choice}")
+        return None
+
+    if selected not in {idx for idx, _ in input_devices}:
+        log("ERROR", f"Device index {selected} is not an input device")
+        return None
+
+    sd.default.device = (selected, sd.default.device[1])
+    log("IDLE", f"Selected input device {selected}")
+    return selected
+
+
+def record_audio(duration: float = RECORD_SECONDS, device: int | None = None) -> bytes:
     """Record audio from microphone."""
     import sounddevice as sd
     import numpy as np
@@ -48,6 +96,7 @@ def record_audio(duration: float = RECORD_SECONDS) -> bytes:
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
         dtype=np.float32,
+        device=device,
     )
     sd.wait()
 
@@ -69,10 +118,13 @@ def transcribe(audio_path: Path) -> str:
     try:
         import mlx_whisper
 
-        log("TRANSCRIBING", f"Transcribing {audio_path}...")
+        whisper_repo = os.environ.get(
+            "OPENCLAW_WHISPER_REPO", "mlx-community/whisper-base-mlx"
+        )
+        log("TRANSCRIBING", f"Transcribing {audio_path} with {whisper_repo}...")
         result = mlx_whisper.transcribe(
             str(audio_path),
-            path_or_hf_repo="mlx-community/whisper-base",
+            path_or_hf_repo=whisper_repo,
         )
         text = result.get("text", "").strip()
         log("TRANSCRIBING", f"Result: {text}")
@@ -186,19 +238,37 @@ async def voice_loop(gateway_url: str):
     print("=" * 60)
     print(f"  Gateway: {gateway_url}")
     print(f"  Recording: {RECORD_SECONDS}s fixed duration")
-    print(f"  Press Enter to speak, Ctrl+C to quit")
+    print("  Press Enter to speak, 'm' to select microphone, Ctrl+C to quit")
     print("=" * 60 + "\n")
+
+    selected_input_device = None
 
     while True:
         try:
-            input("\n>>> Press Enter to start recording...")
+            try:
+                cmd = input("\n>>> Press Enter to start recording (m=mic, q=quit)...")
+            except KeyboardInterrupt:
+                print("\n")
+                log("IDLE", "Goodbye!")
+                break
+            cmd = cmd.strip().lower()
+            if cmd in {"q", "quit", "exit"}:
+                log("IDLE", "Goodbye!")
+                break
+            if cmd in {"m", "mic", "microphone"}:
+                selected_input_device = select_microphone()
+                continue
+            if cmd:
+                log("IDLE", f"Unknown command '{cmd}', press Enter to record")
+                continue
+
             log("IDLE", "Starting voice interaction")
 
             # Record audio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 audio_path = Path(f.name)
 
-            audio_data = record_audio()
+            audio_data = record_audio(device=selected_input_device)
             save_wav(audio_data, audio_path)
 
             # Transcribe
