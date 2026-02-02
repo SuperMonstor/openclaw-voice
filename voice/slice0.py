@@ -265,7 +265,8 @@ def wait_for_wake_word(device: int | None = None):
                 score = scores.get(model_name, 0.0)
                 now = time.time()
                 if WAKEWORD_DEBUG and (now - last_debug) >= 1.0:
-                    log("WAKEWORD", f"Score {score:.3f}")
+                    rms = float(np.sqrt(np.mean(audio**2)))
+                    log("WAKEWORD", f"Score {score:.3f} RMS {rms:.4f}")
                     last_debug = now
                 if score >= WAKEWORD_THRESHOLD and (now - last_trigger) >= WAKEWORD_DEBOUNCE_SEC:
                     last_trigger = now
