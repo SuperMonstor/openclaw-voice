@@ -36,8 +36,12 @@ From repo root:
 ## Commit & Pull Request Guidelines
 - Commit messages: short, imperative, and scoped (e.g., "Add gateway probe script").
 - Keep commits atomic; avoid bundling unrelated changes.
+- When implementing a feature, perform atomic commits at regular intervals to keep history clean and allow easy reverts.
 - PRs: include a brief summary, test notes, and screenshots for UI changes.
  - Prefer the `auto-commit` skill conventions: `type: description` with types `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, and no Claude/AI footers.
+
+## Collaboration Notes
+- Do not ask questions you can look up or answer yourself (how to run app, error logs, etc).
 
 ## Configuration & Runtime Notes
 - Config is planned via `config.yaml` (see `voice/src/config.py`).
