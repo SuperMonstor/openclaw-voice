@@ -167,6 +167,8 @@ async def probe_gateway(url: str, message: str | None = None):
                                 if phase == "end":
                                     log("Agent finished")
                                     break
+                            elif event_name == "chat":
+                                log(f"Event: chat {json.dumps(payload)[:200]}")
                             elif "delta" in event_name or "text" in event_name.lower():
                                 text = payload.get("text", payload.get("content", ""))
                                 if text:
