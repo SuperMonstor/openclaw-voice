@@ -19,7 +19,6 @@ import asyncio
 import json
 import os
 import queue
-import subprocess
 import tempfile
 import argparse
 import uuid
@@ -361,10 +360,18 @@ def transcribe(audio_path: Path) -> str:
         return "Hello, this is a test message."
 
 
+_TTS_ENGINE = None
+
+
 def speak(text: str):
-    """Speak text using macOS say command."""
+    """Speak text using AVSpeechSynthesizer (fallback to `say`)."""
+    global _TTS_ENGINE
+    if _TTS_ENGINE is None:
+        from src.tts import TTS
+
+        _TTS_ENGINE = TTS(logger=log)
     log("SPEAKING", f"Speaking: {text[:50]}...")
-    subprocess.run(["say", text], check=True)
+    _TTS_ENGINE.speak(text)
     log("SPEAKING", "Done speaking")
 
 
