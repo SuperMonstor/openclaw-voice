@@ -126,10 +126,14 @@ def init_wake_word_model():
         log("ERROR", f"Unknown wake word model: {WAKEWORD_MODEL}")
         return None, None
 
-    model = openwakeword.Model(
-        wakeword_models=[WAKEWORD_MODEL],
-        inference_framework="onnx",
-    )
+    try:
+        model = openwakeword.Model(
+            wakeword_models=[WAKEWORD_MODEL],
+        )
+    except Exception as exc:
+        log("ERROR", f"Failed to load wake word model: {type(exc).__name__}")
+        log("ERROR", "Install tflite runtime: pip install tflite-runtime")
+        return None, None
     return model, model_name
 
 
