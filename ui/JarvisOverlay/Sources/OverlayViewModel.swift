@@ -39,7 +39,9 @@ struct CLIArgs {
 
 final class OverlayViewModel: ObservableObject {
     @Published var state: OverlayState = .idle
-    @Published var transcription: String = "Ready"
+    @Published var liveTranscription: String = ""
+    @Published var responseText: String = ""
+    @Published var statusText: String = "Ready"
 
     private var timer: Timer?
     private var socket: VoiceEngineSocket?
@@ -62,7 +64,9 @@ final class OverlayViewModel: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.state = states[idx % states.count]
-            self.transcription = "State: \(self.state.rawValue)"
+            self.statusText = "State: \(self.state.rawValue)"
+            self.liveTranscription = self.state == .listening ? "Listening to you..." : ""
+            self.responseText = self.state == .responding ? "Thinking in streaming chunks..." : ""
             idx += 1
         }
     }
@@ -91,17 +95,46 @@ final class OverlayViewModel: ObservableObject {
             if let stateRaw = payload["state"] as? String,
                let state = OverlayState(rawValue: stateRaw.lowercased()) {
                 self.state = state
+                handleStateReset(for: state)
             }
         case "transcription":
             if let text = payload["text"] as? String {
-                self.transcription = text
+                applyTextUpdate(text, payload: payload, target: &liveTranscription)
             }
         case "response_chunk":
             if let text = payload["text"] as? String {
-                self.transcription = text
+                applyTextUpdate(text, payload: payload, target: &responseText)
             }
         default:
             break
+        }
+    }
+
+    private func handleStateReset(for state: OverlayState) {
+        switch state {
+        case .idle:
+            statusText = "Ready"
+            liveTranscription = ""
+            responseText = ""
+        case .listening:
+            statusText = "Listening"
+            liveTranscription = ""
+            responseText = ""
+        case .transcribing:
+            statusText = "Transcribing"
+            responseText = ""
+        case .responding:
+            statusText = "Responding"
+        case .speaking:
+            statusText = "Speaking"
+        }
+    }
+
+    private func applyTextUpdate(_ text: String, payload: [String: Any], target: inout String) {
+        if let append = payload["append"] as? Bool, append {
+            target += text
+        } else {
+            target = text
         }
     }
 }

@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func defaultFrame() -> NSRect {
-        let size = NSSize(width: 320, height: 120)
+        let size = NSSize(width: 380, height: 160)
         guard let screen = NSScreen.main else {
             return NSRect(origin: .zero, size: size)
         }
