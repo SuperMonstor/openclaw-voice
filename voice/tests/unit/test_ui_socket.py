@@ -18,11 +18,18 @@ def test_ui_socket_broadcast():
     server.start()
 
     deadline = time.time() + 1.0
-    while not socket_path.exists() and time.time() < deadline:
-        time.sleep(0.01)
-
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.connect(str(socket_path))
+    while time.time() < deadline:
+        if socket_path.exists():
+            try:
+                client.connect(str(socket_path))
+                break
+            except ConnectionRefusedError:
+                time.sleep(0.01)
+                continue
+        time.sleep(0.01)
+    else:
+        raise RuntimeError("Failed to connect to UI socket")
 
     server.send_event("state_change", {"state": "listening"})
     data = client.recv(4096)
