@@ -49,6 +49,7 @@ async def probe_gateway(url: str, message: str | None = None):
             challenge = await asyncio.wait_for(ws.recv(), timeout=5.0)
             challenge_data = json.loads(challenge)
             log(f"Received: {challenge_data.get('event', challenge_data.get('type', 'unknown'))}")
+            log(f"Challenge payload: {json.dumps(challenge_data.get('payload', {}))}")
 
             if challenge_data.get("event") == "connect.challenge":
                 # Respond with connect request (operator role, loopback)
