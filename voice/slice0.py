@@ -522,10 +522,17 @@ async def voice_loop(gateway_url: str):
     default_mic = get_default_input_device_name()
     if default_mic:
         print(f"  Default mic: {default_mic}")
-    print("  Press Enter to start wake-word listening, 'm' to select microphone, Ctrl+C to quit")
+    print("  Listening for wake word immediately. Ctrl+C to quit.")
     print("=" * 60 + "\n")
 
     selected_input_device = None
+    env_device = os.environ.get("OPENCLAW_INPUT_DEVICE")
+    if env_device is not None:
+        try:
+            selected_input_device = int(env_device)
+            log("IDLE", f"Using input device {selected_input_device} from OPENCLAW_INPUT_DEVICE")
+        except ValueError:
+            log("ERROR", f"Invalid OPENCLAW_INPUT_DEVICE: {env_device}")
 
     from src.ui_socket import UISocketServer
 
@@ -535,23 +542,6 @@ async def voice_loop(gateway_url: str):
 
     try:
         while True:
-            try:
-                cmd = input("\n>>> Press Enter to start wake-word listening (m=mic, q=quit)...")
-            except KeyboardInterrupt:
-                print("\n")
-                log("IDLE", "Goodbye!")
-                break
-            cmd = cmd.strip().lower()
-            if cmd in {"q", "quit", "exit"}:
-                log("IDLE", "Goodbye!")
-                break
-            if cmd in {"m", "mic", "microphone"}:
-                selected_input_device = select_microphone()
-                continue
-            if cmd:
-                log("IDLE", f"Unknown command '{cmd}', press Enter to listen")
-                continue
-
             log("WAKEWORD", "Waiting for wake word...")
             ui_socket.send_event("state_change", {"state": "idle"})
             if wait_for_wake_word(device=selected_input_device) is False:
