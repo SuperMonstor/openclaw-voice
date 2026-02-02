@@ -1,6 +1,7 @@
 import json
 import socket
 import tempfile
+import time
 from pathlib import Path
 
 from src.ui_socket import UISocketServer
@@ -15,6 +16,10 @@ def test_ui_socket_broadcast():
     socket_path = _short_socket_path()
     server = UISocketServer(path=str(socket_path))
     server.start()
+
+    deadline = time.time() + 1.0
+    while not socket_path.exists() and time.time() < deadline:
+        time.sleep(0.01)
 
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(str(socket_path))
