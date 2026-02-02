@@ -50,7 +50,7 @@ final class VoiceEngineSocket {
             return false
         }
         withUnsafeMutableBytes(of: &addr.sun_path) { rawBuffer in
-            rawBuffer.initialize(repeating: 0)
+            rawBuffer.copyBytes(from: [UInt8](repeating: 0, count: rawBuffer.count))
             _ = rawBuffer.copyBytes(from: pathBytes)
         }
 
