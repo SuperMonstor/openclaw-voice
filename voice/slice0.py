@@ -256,6 +256,25 @@ async def send_to_gateway(url: str, message: str) -> str:
                         if phase == "end":
                             log("GATEWAY", "Response complete")
                             break
+                    elif event_name == "chat":
+                        state = payload.get("state")
+                        message = payload.get("message", {})
+                        content = message.get("content", [])
+                        if isinstance(content, dict):
+                            content = [content]
+                        if isinstance(content, list):
+                            for item in content:
+                                if not isinstance(item, dict):
+                                    continue
+                                if item.get("type") != "text":
+                                    continue
+                                text = item.get("text", "")
+                                if text:
+                                    full_response += text
+                                    print(text, end="", flush=True)
+                        if state in {"final", "error", "aborted"}:
+                            log("GATEWAY", f"Chat state: {state}")
+                            break
                     elif "delta" in event_name or "text" in event_name.lower():
                         text = payload.get("text", payload.get("content", ""))
                         if text:
