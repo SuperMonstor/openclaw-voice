@@ -32,6 +32,9 @@ from pathlib import Path
 SAMPLE_RATE = 16000
 CHANNELS = 1
 RECORD_SECONDS = 5  # Fixed recording duration for slice0
+VAD_THRESHOLD = float(os.environ.get("OPENCLAW_VAD_THRESHOLD", "0.5"))
+VAD_MIN_SPEECH = float(os.environ.get("OPENCLAW_VAD_MIN_SPEECH", "0.2"))
+VAD_MIN_SILENCE = float(os.environ.get("OPENCLAW_VAD_MIN_SILENCE", "1.0"))
 PROTOCOL_VERSION = 3
 WAKEWORD_MODEL = os.environ.get("OPENCLAW_WAKEWORD_MODEL", "hey_jarvis")
 WAKEWORD_THRESHOLD = float(os.environ.get("OPENCLAW_WAKEWORD_THRESHOLD", "0.5"))
@@ -282,22 +285,48 @@ def wait_for_wake_word(device: int | None = None):
             return False
 
 
-def record_audio(duration: float = RECORD_SECONDS, device: int | None = None) -> bytes:
-    """Record audio from microphone."""
+def record_audio_until_silence(device: int | None = None) -> bytes:
+    """Record audio until VAD detects end-of-utterance."""
     import sounddevice as sd
     import numpy as np
 
-    log("LISTENING", f"Recording for {duration}s... Speak now!")
+    from src.vad import SileroVAD, VADConfig
 
-    recording = sd.rec(
-        int(duration * SAMPLE_RATE),
+    vad = SileroVAD(
+        VADConfig(
+            threshold=VAD_THRESHOLD,
+            min_speech_duration=VAD_MIN_SPEECH,
+            min_silence_duration=VAD_MIN_SILENCE,
+        )
+    )
+
+    frames: list[np.ndarray] = []
+    audio_q: queue.Queue[np.ndarray] = queue.Queue()
+
+    def callback(indata, frames_count, time_info, status):
+        if status:
+            log("LISTENING", f"Audio status: {status}")
+        audio_q.put(indata.copy())
+
+    log("LISTENING", "Recording... Speak now!")
+
+    with sd.InputStream(
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
         dtype=np.float32,
+        blocksize=1280,
         device=device,
-    )
-    sd.wait()
+        callback=callback,
+    ):
+        while True:
+            frame = audio_q.get()
+            frame = np.squeeze(frame)
+            frames.append(frame)
+            audio_int16 = np.clip(frame * 32768.0, -32768, 32767).astype(np.int16)
+            if vad.stream_until_silence(audio_int16, SAMPLE_RATE):
+                break
 
+    recording = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
     log("LISTENING", "Recording complete")
     return recording
 
@@ -476,7 +505,10 @@ async def voice_loop(gateway_url: str):
     print("  OpenClaw Voice - Slice 0 (Ugly but Working)")
     print("=" * 60)
     print(f"  Gateway: {gateway_url}")
-    print(f"  Recording: {RECORD_SECONDS}s fixed duration")
+    print(
+        "  Recording: VAD-based (threshold "
+        f"{VAD_THRESHOLD}, min_speech {VAD_MIN_SPEECH}s, min_silence {VAD_MIN_SILENCE}s)"
+    )
     print(f"  Wake word: {WAKEWORD_MODEL} (threshold {WAKEWORD_THRESHOLD})")
     default_mic = get_default_input_device_name()
     if default_mic:
@@ -515,7 +547,7 @@ async def voice_loop(gateway_url: str):
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 audio_path = Path(f.name)
 
-            audio_data = record_audio(device=selected_input_device)
+            audio_data = record_audio_until_silence(device=selected_input_device)
             save_wav(audio_data, audio_path)
 
             # Transcribe

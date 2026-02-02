@@ -36,6 +36,8 @@ class AudioConfig:
     chunk_size: int = 1280  # 80ms at 16kHz
     silence_threshold: float = 0.01
     silence_duration: float = 1.5  # seconds of silence to end recording
+    vad_threshold: float = 0.5
+    min_speech_duration: float = 0.2
 
 
 @dataclass
@@ -87,6 +89,8 @@ class Config:
                 "chunk_size": self.audio.chunk_size,
                 "silence_threshold": self.audio.silence_threshold,
                 "silence_duration": self.audio.silence_duration,
+                "vad_threshold": self.audio.vad_threshold,
+                "min_speech_duration": self.audio.min_speech_duration,
             },
         }
         with open(path, "w") as f:
