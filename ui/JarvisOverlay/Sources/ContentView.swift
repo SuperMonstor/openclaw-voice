@@ -1,10 +1,11 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: OverlayViewModel
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topTrailing) {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(LinearGradient(
                     colors: [
@@ -35,7 +36,7 @@ struct ContentView: View {
                 )
 
             HStack(spacing: 16) {
-                RingView(state: viewModel.state)
+                ConstellationView(state: viewModel.state, micLevel: viewModel.micLevel)
                     .frame(width: 72, height: 72)
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -81,6 +82,17 @@ struct ContentView: View {
                 Spacer(minLength: 0)
             }
             .padding(16)
+
+            Button(action: { NotificationCenter.default.post(name: .overlayCloseRequested, object: nil) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.8))
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Color.white.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .accessibilityLabel("Close overlay")
         }
         .frame(width: 380, height: 160)
     }

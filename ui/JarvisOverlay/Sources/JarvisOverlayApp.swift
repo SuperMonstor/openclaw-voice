@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func handleCloseRequested() {
+        viewModel.shutdownEngine()
         window?.orderOut(nil)
         window?.close()
         NSApp.terminate(nil)
@@ -106,14 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func statusIconImage() -> NSImage? {
-        if let image = NSImage(
-            named: "StatusIcon",
-            in: .module,
-            compatibleWith: nil
-        ) {
+        if let image = NSImage(named: NSImage.Name("StatusIcon")) {
             image.isTemplate = true
             return image
         }
-        return NSImage(systemSymbolName: "waveform", accessibilityDescription: "Jarvis")
+        let fallback = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Jarvis")
+        fallback?.isTemplate = true
+        return fallback
     }
 }

@@ -7,7 +7,7 @@ import os
 import queue
 import socket
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Callable
 
 
 class UISocketServer:
@@ -19,7 +19,9 @@ class UISocketServer:
         self._running = False
         self._thread: threading.Thread | None = None
         self._send_thread: threading.Thread | None = None
+        self._recv_threads: List[threading.Thread] = []
         self._send_queue: "queue.Queue[bytes]" = queue.Queue()
+        self.on_command: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
     def start(self):
         if self._running:
@@ -73,6 +75,55 @@ class UISocketServer:
                 continue
             with self._lock:
                 self._clients.append(client)
+            recv_thread = threading.Thread(
+                target=self._recv_loop, args=(client,), daemon=True
+            )
+            recv_thread.start()
+            self._recv_threads.append(recv_thread)
+
+    def _recv_loop(self, client: socket.socket):
+        buffer = b""
+        try:
+            while self._running:
+                try:
+                    data = client.recv(4096)
+                except Exception:
+                    break
+                if not data:
+                    break
+                buffer += data
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    self._handle_line(line)
+        finally:
+            with self._lock:
+                if client in self._clients:
+                    self._clients.remove(client)
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _handle_line(self, line: bytes):
+        if not line:
+            return
+        try:
+            message = json.loads(line.decode("utf-8"))
+        except Exception:
+            return
+        if not isinstance(message, dict):
+            return
+        if message.get("type") != "command":
+            return
+        command = message.get("command")
+        if not isinstance(command, str):
+            return
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        handler = self.on_command
+        if handler is not None:
+            handler(command, payload)
 
     def _send_loop(self):
         while self._running:

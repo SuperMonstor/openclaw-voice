@@ -26,6 +26,51 @@ final class VoiceEngineSocket {
         closeSocket()
     }
 
+    func sendCommand(_ command: String, payload: [String: Any] = [:]) {
+        var message: [String: Any] = [
+            "type": "command",
+            "command": command
+        ]
+        if !payload.isEmpty {
+            message["payload"] = payload
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
+            return
+        }
+        var packet = data
+        packet.append(0x0A)
+
+        if fd >= 0 {
+            _ = packet.withUnsafeBytes { rawBuffer in
+                guard let base = rawBuffer.baseAddress else { return 0 }
+                return Darwin.write(fd, base, rawBuffer.count)
+            }
+            return
+        }
+
+        let tempFd = socket(AF_UNIX, SOCK_STREAM, 0)
+        if tempFd < 0 {
+            return
+        }
+        guard var addr = makeSocketAddress() else {
+            _ = Darwin.close(tempFd)
+            return
+        }
+        let addrLen = socklen_t(MemoryLayout.size(ofValue: addr))
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(tempFd, $0, addrLen)
+            }
+        }
+        if result == 0 {
+            _ = packet.withUnsafeBytes { rawBuffer in
+                guard let base = rawBuffer.baseAddress else { return 0 }
+                return Darwin.write(tempFd, base, rawBuffer.count)
+            }
+        }
+        _ = Darwin.close(tempFd)
+    }
+
     private func runLoop() {
         while running {
             if connectSocket() {
@@ -42,18 +87,10 @@ final class VoiceEngineSocket {
         if fd < 0 {
             return false
         }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        if pathBytes.count >= MemoryLayout.size(ofValue: addr.sun_path) {
+        guard var addr = makeSocketAddress() else {
+            closeSocket()
             return false
         }
-        withUnsafeMutableBytes(of: &addr.sun_path) { rawBuffer in
-            rawBuffer.copyBytes(from: [UInt8](repeating: 0, count: rawBuffer.count))
-            _ = rawBuffer.copyBytes(from: pathBytes)
-        }
-
         let addrLen = socklen_t(MemoryLayout.size(ofValue: addr))
         let result = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -65,6 +102,20 @@ final class VoiceEngineSocket {
             return false
         }
         return true
+    }
+
+    private func makeSocketAddress() -> sockaddr_un? {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        if pathBytes.count >= MemoryLayout.size(ofValue: addr.sun_path) {
+            return nil
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { rawBuffer in
+            rawBuffer.copyBytes(from: [UInt8](repeating: 0, count: rawBuffer.count))
+            rawBuffer.copyBytes(from: pathBytes)
+        }
+        return addr
     }
 
     private func readLoop() {

@@ -24,8 +24,10 @@ import argparse
 import uuid
 import time
 import urllib.request
+import threading
 from datetime import datetime
 from pathlib import Path
+import re
 
 # Audio settings
 SAMPLE_RATE = 16000
@@ -35,7 +37,7 @@ VAD_THRESHOLD = float(os.environ.get("OPENCLAW_VAD_THRESHOLD", "0.5"))
 VAD_MIN_SPEECH = float(os.environ.get("OPENCLAW_VAD_MIN_SPEECH", "0.2"))
 VAD_MIN_SILENCE = float(os.environ.get("OPENCLAW_VAD_MIN_SILENCE", "1.0"))
 PROTOCOL_VERSION = 3
-WAKEWORD_MODEL = os.environ.get("OPENCLAW_WAKEWORD_MODEL", "hey_jarvis")
+DEFAULT_WAKEWORD_MODEL = "hey_jarvis"
 WAKEWORD_THRESHOLD = float(os.environ.get("OPENCLAW_WAKEWORD_THRESHOLD", "0.5"))
 WAKEWORD_DEBOUNCE_SEC = 1.0
 WAKEWORD_DEBUG = os.environ.get("OPENCLAW_WAKEWORD_DEBUG", "0") == "1"
@@ -75,25 +77,82 @@ def get_default_input_device_name() -> str | None:
         return None
 
 
+def load_openclaw_config(log_errors: bool = False) -> dict | None:
+    """Load OpenClaw config from disk."""
+    config_path = os.environ.get(
+        "OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json")
+    )
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        if log_errors:
+            log("ERROR", f"Failed to read OpenClaw config: {type(exc).__name__}")
+        return None
+
+
 def load_gateway_token() -> str | None:
     """Load gateway auth token from env or OpenClaw config."""
     token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
     if token:
         return token
 
-    config_path = os.environ.get(
-        "OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json")
-    )
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        return config.get("gateway", {}).get("auth", {}).get("token")
-    except FileNotFoundError:
+    config = load_openclaw_config(log_errors=True)
+    if not config:
         return None
-    except Exception as exc:
-        log("ERROR", f"Failed to read OpenClaw config: {type(exc).__name__}")
+    return config.get("gateway", {}).get("auth", {}).get("token")
+
+
+def load_assistant_name() -> str | None:
+    """Load assistant name from OpenClaw workspace identity."""
+    env_name = os.environ.get("OPENCLAW_ASSISTANT_NAME")
+    if env_name:
+        return env_name.strip() or None
+
+    config = load_openclaw_config()
+    workspace = None
+    if config:
+        workspace = (
+            config.get("agents", {})
+            .get("defaults", {})
+            .get("workspace")
+        )
+    if not workspace:
+        workspace = str(Path.home() / ".openclaw" / "workspace")
+
+    identity_path = Path(workspace) / "IDENTITY.md"
+    if not identity_path.exists():
         return None
 
+    try:
+        with open(identity_path, "r", encoding="utf-8") as f:
+            for line in f:
+                match = re.match(r"^\s*-\s*\*\*Name:\*\*\s*(.+?)\s*$", line)
+                if match:
+                    name = match.group(1).strip()
+                    return name or None
+    except Exception:
+        return None
+    return None
+
+
+def resolve_wakeword_model() -> str:
+    """Resolve wake word model name from env or assistant identity."""
+    override = os.environ.get("OPENCLAW_WAKEWORD_MODEL")
+    if override:
+        return override
+    assistant_name = load_assistant_name()
+    if not assistant_name:
+        return DEFAULT_WAKEWORD_MODEL
+    slug = re.sub(r"[^a-z0-9]+", "_", assistant_name.lower()).strip("_")
+    if not slug:
+        return DEFAULT_WAKEWORD_MODEL
+    return f"hey_{slug}"
+
+
+WAKEWORD_MODEL = resolve_wakeword_model()
 
 def select_microphone() -> int | None:
     """Prompt user to select an input device. Returns selected device index."""
@@ -189,8 +248,17 @@ def init_wake_word_model():
     ensure_file(melspec_url, melspec_path)
     ensure_file(embed_url, embed_path)
 
-    if WAKEWORD_MODEL in openwakeword.MODELS:
-        model_name = WAKEWORD_MODEL
+    model_candidate = WAKEWORD_MODEL
+    if model_candidate not in openwakeword.MODELS and not os.path.exists(model_candidate):
+        if model_candidate != DEFAULT_WAKEWORD_MODEL:
+            log(
+                "WAKEWORD",
+                f"Unknown wake word model '{model_candidate}', falling back to '{DEFAULT_WAKEWORD_MODEL}'",
+            )
+        model_candidate = DEFAULT_WAKEWORD_MODEL
+
+    if model_candidate in openwakeword.MODELS:
+        model_name = model_candidate
         model_info = openwakeword.MODELS[model_name]
         base_path = model_info["model_path"].replace(".tflite", feature_suffix)
         base_url = model_info.get("download_url")
@@ -205,9 +273,9 @@ def init_wake_word_model():
             log("ERROR", f"Wake word model not found: {base_path}")
             return None, None
         model_path = str(target_path)
-    elif os.path.exists(WAKEWORD_MODEL):
-        model_name = os.path.splitext(os.path.basename(WAKEWORD_MODEL))[0]
-        model_path = WAKEWORD_MODEL
+    elif os.path.exists(model_candidate):
+        model_name = os.path.splitext(os.path.basename(model_candidate))[0]
+        model_path = model_candidate
         if model_path.endswith(".onnx"):
             inference_framework = "onnx"
             feature_suffix = ".onnx"
@@ -236,7 +304,9 @@ def init_wake_word_model():
     return model, model_name
 
 
-def wait_for_wake_word(device: int | None = None):
+def wait_for_wake_word(
+    device: int | None = None, stop_event: threading.Event | None = None
+):
     """Block until wake word is detected."""
     import sounddevice as sd
     import numpy as np
@@ -266,7 +336,12 @@ def wait_for_wake_word(device: int | None = None):
     ):
         try:
             while True:
-                audio = audio_q.get()
+                if stop_event is not None and stop_event.is_set():
+                    return False
+                try:
+                    audio = audio_q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
                 audio = np.squeeze(audio)
                 audio_int16 = np.clip(audio * 32768.0, -32768, 32767).astype(np.int16)
                 scores = model.predict(audio_int16)
@@ -284,7 +359,9 @@ def wait_for_wake_word(device: int | None = None):
             return False
 
 
-def record_audio_until_silence(device: int | None = None) -> bytes:
+def record_audio_until_silence(
+    device: int | None = None, stop_event: threading.Event | None = None
+) -> bytes | None:
     """Record audio until VAD detects end-of-utterance."""
     import sounddevice as sd
     import numpy as np
@@ -318,7 +395,13 @@ def record_audio_until_silence(device: int | None = None) -> bytes:
         callback=callback,
     ):
         while True:
-            frame = audio_q.get()
+            if stop_event is not None and stop_event.is_set():
+                log("LISTENING", "Stop requested, ending recording")
+                return None
+            try:
+                frame = audio_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
             frame = np.squeeze(frame)
             frames.append(frame)
             audio_int16 = np.clip(frame * 32768.0, -32768, 32767).astype(np.int16)
@@ -373,6 +456,43 @@ def speak(text: str):
     log("SPEAKING", f"Speaking: {text[:50]}...")
     _TTS_ENGINE.speak(text)
     log("SPEAKING", "Done speaking")
+
+
+def _extract_content_from_message(message) -> str:
+    """Match OpenClaw's message text extraction (content-only, no thinking)."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        stop_reason = message.get("stopReason", "")
+        if stop_reason == "error":
+            error_message = message.get("errorMessage", "")
+            return str(error_message).strip()
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    if not parts:
+        stop_reason = message.get("stopReason", "")
+        if stop_reason == "error":
+            error_message = message.get("errorMessage", "")
+            return str(error_message).strip()
+    return "\n".join(part.strip() for part in parts if part).strip()
+
+
+def _append_text(full_response: str, text: str, on_chunk) -> str:
+    if not text:
+        return full_response
+    full_response += text
+    print(text, end="", flush=True)
+    if on_chunk:
+        on_chunk(text)
+    return full_response
 
 
 async def send_to_gateway(url: str, message: str, on_chunk=None) -> str:
@@ -460,41 +580,47 @@ async def send_to_gateway(url: str, message: str, on_chunk=None) -> str:
                 data = json.loads(msg)
 
                 msg_type = data.get("type")
-                if msg_type == "event":
+                if msg_type == "res":
+                    payload = data.get("payload", {})
+                    if isinstance(payload, dict) and payload.get("message"):
+                        text = _extract_content_from_message(payload.get("message"))
+                        full_response = _append_text(full_response, text, on_chunk)
+                elif msg_type == "event":
                     event_name = data.get("event", "")
                     payload = data.get("payload", {})
 
                     if event_name == "agent":
-                        phase = payload.get("phase")
+                        stream = payload.get("stream")
+                        data_payload = payload.get("data", {})
+                        if stream == "assistant" and isinstance(data_payload, dict):
+                            text = data_payload.get("text")
+                            if isinstance(text, str):
+                                full_response = _append_text(full_response, text, on_chunk)
+                        phase = data_payload.get("phase") if isinstance(data_payload, dict) else None
                         if phase == "end":
                             log("GATEWAY", "Response complete")
                             break
-                    elif event_name == "chat":
+                    elif event_name.startswith("chat"):
                         state = payload.get("state")
-                        message = payload.get("message", {})
-                        content = message.get("content", [])
-                        if isinstance(content, dict):
-                            content = [content]
-                        if isinstance(content, list):
-                            for item in content:
-                                if not isinstance(item, dict):
-                                    continue
-                                if item.get("type") != "text":
-                                    continue
-                                text = item.get("text", "")
-                                if text:
-                                    full_response += text
-                                    print(text, end="", flush=True)
-                                    if on_chunk:
-                                        on_chunk(text)
+                        message = payload.get("message")
+                        if isinstance(message, str):
+                            full_response = _append_text(full_response, message, on_chunk)
+                        else:
+                            text = _extract_content_from_message(message)
+                            full_response = _append_text(full_response, text, on_chunk)
                         if state in {"final", "error", "aborted"}:
+                            if not full_response:
+                                log(
+                                    "GATEWAY",
+                                    "Chat final with no text; payload="
+                                    f"{json.dumps(payload)[:200]}",
+                                )
                             log("GATEWAY", f"Chat state: {state}")
                             break
                     elif "delta" in event_name or "text" in event_name.lower():
-                        text = payload.get("text", payload.get("content", ""))
-                        if text:
-                            full_response += text
-                            print(text, end="", flush=True)
+                        if isinstance(payload, dict) and payload.get("message"):
+                            text = _extract_content_from_message(payload.get("message"))
+                            full_response = _append_text(full_response, text, on_chunk)
 
             except asyncio.TimeoutError:
                 # Check if we have a response and it's been quiet
@@ -537,14 +663,26 @@ async def voice_loop(gateway_url: str):
     from src.ui_socket import UISocketServer
 
     ui_socket = UISocketServer()
+    stop_event = threading.Event()
+
+    def handle_command(command: str, payload: dict):
+        if command == "shutdown":
+            log("IDLE", "Shutdown requested by UI")
+            stop_event.set()
+
+    ui_socket.on_command = handle_command
     ui_socket.start()
     ui_socket.send_event("state_change", {"state": "idle"})
 
     try:
         while True:
+            if stop_event.is_set():
+                break
             log("WAKEWORD", "Waiting for wake word...")
             ui_socket.send_event("state_change", {"state": "idle"})
-            if wait_for_wake_word(device=selected_input_device) is False:
+            if wait_for_wake_word(
+                device=selected_input_device, stop_event=stop_event
+            ) is False:
                 log("IDLE", "Goodbye!")
                 break
             ui_socket.send_event("state_change", {"state": "listening"})
@@ -554,7 +692,12 @@ async def voice_loop(gateway_url: str):
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 audio_path = Path(f.name)
 
-            audio_data = record_audio_until_silence(device=selected_input_device)
+            audio_data = record_audio_until_silence(
+                device=selected_input_device, stop_event=stop_event
+            )
+            if stop_event.is_set() or audio_data is None:
+                log("IDLE", "Stopping voice loop")
+                break
             save_wav(audio_data, audio_path)
 
             # Transcribe
@@ -645,7 +788,11 @@ def main():
         print("Note: mlx-whisper not installed. Install with: pip install mlx-whisper")
         print("      Continuing with mock transcription...\n")
 
-    asyncio.run(voice_loop(args.gateway))
+    try:
+        asyncio.run(voice_loop(args.gateway))
+    except KeyboardInterrupt:
+        # Suppress asyncio.run() KeyboardInterrupt traceback on Ctrl+C.
+        pass
 
 
 if __name__ == "__main__":

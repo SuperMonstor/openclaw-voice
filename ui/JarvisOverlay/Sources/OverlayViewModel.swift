@@ -42,9 +42,28 @@ final class OverlayViewModel: ObservableObject {
     @Published var liveTranscription: String = ""
     @Published var responseText: String = ""
     @Published var statusText: String = "Ready"
+    @Published var micLevel: Double = 0
 
     private var timer: Timer?
     private var socket: VoiceEngineSocket?
+    private let micMonitor = MicrophoneLevelMonitor()
+
+    init() {
+        micMonitor.onLevel = { [weak self] level in
+            self?.updateMicLevel(level)
+        }
+        micMonitor.start()
+    }
+
+    deinit {
+        micMonitor.stop()
+    }
+
+    func shutdownEngine() {
+        socket?.sendCommand("shutdown")
+        socket?.stop()
+        micMonitor.stop()
+    }
 
     func apply(args: CLIArgs) {
         if let state = args.state {
@@ -136,5 +155,12 @@ final class OverlayViewModel: ObservableObject {
         } else {
             target = text
         }
+    }
+
+    private func updateMicLevel(_ level: Double) {
+        let clamped = min(max(level, 0), 1)
+        let gated = max(0, clamped - 0.04) / 0.96
+        let smoothing = 0.18
+        micLevel = micLevel * (1 - smoothing) + gated * smoothing
     }
 }
